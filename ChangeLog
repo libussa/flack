@@ -1,0 +1,63 @@
+flack ChangeLog
+===============
+
+[2.0.6] 23rd November 2010
+ - fixed colorization when viewing tags
+
+[2.0.5] 7th October 2010
+ - when using the add fields one at a time option it no longer adds
+   duplicate fields
+
+[2.0.4] 20th March 2009
+ - fixed adding of tracknumbers automatically
+ - stop allowing addition of empty tag fields
+ - fixed --maximum-tag-lines option
+ - fixed display of version in --help
+
+[2.0.3] 17th March 2009
+ - added option to display only black and white text for better
+   visibility on white terminal backgrounds
+ - added some more confirmation dialogs before certain commands
+ - when using the --keep-special-characters option any occurrences of
+   '/' are still replaced with an underscore
+
+[2.0.2] 9th March 2009
+ - make more visible on white terminal background
+ - changed menu entry from 'Add Tags' to 'Edit Tags'
+
+[2.0.1] 4th March 2009
+ - slightly incorrect information shown by '--help'
+
+[2.0.0] 4th March 2009
+ - massive rewrite of most of the script, making it more readable and
+   reducing the size by ~200 lines, while including much more
+   functionality
+ - changed flackrc file syntax
+ - improved command line options
+ - improved appearance/interface
+ - when viewing a single file, tags are shown above menu
+ - option to view logfile
+ - filechecks on startup
+ - file progress counter when executing commands
+ - when changing filenames, the custom rules now support any custom
+   fields contained within the VORBIS_COMMENT block
+ - checks on whether a file is readable/writable is now done
+   separately from the 'find' command.
+ - fixed a MAJOR bug when changing filename for files without tags,
+   which would result in all selected files being moved to '.flac'
+ - some more bug fixes
+
+[1.0.3] 20th February 2009
+ - very small fix: remove '-readable' option from the find command as
+   this is only available in findutils 4.3.0 or later.
+
+[1.0.2] 14th January 2009
+ - more bug fixes
+
+[1.0.1] 9th August 2008
+ - minor bug fixes
+
+[1.0.0] 2nd August 2008
+ - initial release
+
+# vim: set textwidth=70:

@@ -1,0 +1,54 @@
+About flack
+-----------
+
+flack was born when I decided I didn't need a GUI to edit my FLAC
+collection. Having put quite some time into this project, it seemed
+appropriate to share it with the community.
+
+For installation instructions, view the INSTALL file.
+For changes, view the ChangeLog file.
+
+flack is licensed under the GNU General Public License.
+
+Important Notes
+---------------
+
+- Depending on how many flack files you have, the temporary directory
+  can become a few MB in size. If flack is not running, you can safely
+  delete the temporary directory (/tmp/flack-USERNAME).
+
+- flack now runs checks on startup that determine whether any files
+  throw up errors when accessed by metaflac. If you are accessing a
+  very large directory and the files have already been checked, you
+  can skip with the '-s' option but this is generally not recommended.
+
+- Also checked is whether the file can be written to. These are
+  excluded unless the '-i' command line option is passed. Useful for
+  if you just wish to view tags of files that do not belong to your
+  user. However, at the moment this will break flack if you try to edit
+  unwritable files!
+
+- The syntax of the flackrc file has changed for the 2.0.0 release, so
+  it is important that you use the new file instead. The option to
+  change the temporary directory has been removed, as this causes
+  problems and there really shouldn't be a need to change it anyway.
+  The option to change the logfile is still available though, but when
+  running multiple instances of flack, they will all write to the same
+  logfile.
+
+- The --keep-special-characters option is used during renaming of
+  filenames according to their tags. Normally, any occurrences of '?'
+  ':' or a leading '-' are replaced with '_'. With this option,
+  these characters are not replaced.
+
+- Now when viewing a single file, it's tags are displayed above the
+  menu if there are 10 lines or less. This value can be changed with
+  the '-m' command line option.
+
+Support
+-------
+
+Please report any bugs, feature requests or submit patches by sending
+an email to: dyscoria@gmail.com
+
+# vim: set textwidth=70:

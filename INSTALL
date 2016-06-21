@@ -1,0 +1,31 @@
+WARNING
+-------
+flack has only been tested on BASH 3.2 using x86-pc-linux-gnu and
+x86_64-pc-linux-gnu.
+
+flack requires BASH>=3.2 and FLAC>=1.2.1 to be installed.
+
+HOW TO INSTALL
+--------------
+1. As root, copy 'flack' to /usr/bin or anywhere else you 
+   have set as your PATH:
+
+	install -D -m755 flack /usr/bin/flack
+
+2. Backup any existing configuration files.
+
+3. As root, copy 'flackrc' to /etc/flackrc for global config
+	
+	install -D m644 flackrc /etc/flackrc
+
+4. As your user, copy 'flackrc' to ~/.flackrc for per user config
+
+	install -D m644 flackrc ~/.flackrc
+
+5. Delete this folder and enjoy!
+
+SUPPORT
+-------
+Send an email to dyscoria@gmail.com
+
+# vim: set textwidth=70:

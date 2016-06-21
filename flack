@@ -1,0 +1,1908 @@
+#!/bin/bash
+
+#=============================================================================#
+#          FILE: flack                                                        #
+#       VERSION: 2.0.6                                                        #
+#                                                                             #
+#   DESCRIPTION: a menu-driven BASH script to easily tag your FLAC files      #
+#       LICENSE: GPL                                                          #
+#        AUTHOR: Jamie Nguyen                                                 #
+#=============================================================================#
+
+# Copyright (C) 2008, 2009, 2010 Jamie Nguyen
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 1, or (at your option)
+# any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA  02110-1301 USA
+
+VERSION='2.0.6'
+
+#==============================================================================
+# internal functions
+#==============================================================================
+# {{{
+
+redBold () {
+	tput setab 0;tput setaf 1;tput bold;printf "${1}";tput sgr0
+}
+greenBold () {
+	tput setab 0;tput setaf 2;tput bold;printf "${1}";tput sgr0
+}
+purpleBold () {
+	tput setab 0;tput setaf 5;tput bold;printf "${1}";tput sgr0
+}
+
+enterToContinue () {	# prints arg #1 and waits for empty user input
+	while true; do
+		printf "\n${1}\n\n"
+	 	printPrompt "Press [ENTER] to continue: "
+		read null
+		if [ -z "${null}" ]; then
+			break
+		else
+			continue
+		fi
+	done
+}
+
+MSG_SUCCESS="All operations completed successfully."
+MSG_INVALID="Invalid response!"
+
+printTitle () {			# print the titlebar at the top
+	clear;printf "${FLACK_TITLE}\n"
+}
+printMenuEntry () {		# prints arg #1 in colour and arg #2 on same line
+	purpleBold "${1}";printf "${2}"
+}
+printPrompt () {		# prints arg #1 in green without newline
+	greenBold "${1}"
+}
+printCurrentDir () {	# print the directory currently inside
+	printf "Current directory:\n"
+	redBold "${startdir}\n\n"
+}
+printSelectedFile () {	# print file selected for editing
+	redBold "${file_info}\n\n"
+}
+printYesNo () {			# return 0 for yes and return 1 for no
+	printPrompt "${1}"
+	read answer
+	if [ "${answer}" != 'y' ] && [ "${answer}" != 'Y' ]; then
+		return 1
+	else
+		return 0
+	fi
+}
+printError () {			# prints generic error message
+	printTitle;printSelectedFile
+	enterToContinue "An error occurred running the last command. See '${LOGFILE}' for info."
+}
+
+# needed for colorization when viewing tags
+export LESS="--RAW-CONTROL-CHARS"
+
+USER="$(whoami)"
+TMPDIR="/tmp/flack-${USER}/$(date +%d%b.%H-%M-%S)"
+LOGFILE="${TMPDIR}/flack.log"
+FILELIST="${TMPDIR}/files.list"
+EXCLUDELIST="${TMPDIR}/exclude.list"
+USABLEFILES="${TMPDIR}/usable.list"
+TAGS="${TMPDIR}/tags.cache"
+METADATA="${TMPDIR}/metadata.cache"
+
+# set config file defaults
+COMMON_FIELDS=( TITLE VERSION ALBUM TRACKNUMBER ARTIST PERFORMER COPYRIGHT LICENSE ORGANISATION DESCRIPTION GENRE DATE LOCATION CONTACT ISRC )
+CUSTOM_RULE='${TRACKNUMBER} - ${ARTIST} - ${TITLE}'
+
+# source configuration file if available and compatible
+if [ -e "${HOME}/.flackrc" ]; then
+	flackrcversion="$(head -n 1 "${HOME}/.flackrc")"
+	if [ "${flackrcversion}" != '# flack CONFIG v2 -- DO NOT EDIT THIS LINE' ]; then
+		enterToContinue "> ${HOME}/.flackrc is an old or incompatible version and will not be used."
+	else
+		source "${HOME}/.flackrc"
+	fi
+elif [ -e "/etc/flackrc" ]; then
+	flackrcversion="$(head -n 1 "/etc/flackrc")"
+	if [ "${flackrcversion}" != '# flack CONFIG v2 -- DO NOT EDIT THIS LINE' ]; then
+		enterToContinue "> /etc/flackrc is an old or incompatible version and will not be used."
+	else
+		source "/etc/flackrc"
+	fi
+fi
+
+commonfieldtotal=${#COMMON_FIELDS[@]}
+
+if [ -d ${TMPDIR} ]; then
+	sleep 1;TMPDIR="/tmp/flack-${USER}/$(date +%d%b.%H-%M-%S)"
+fi
+
+if ! mkdir -p "${TMPDIR}" 2>/dev/null; then
+	redBold "ERROR: The temporary directory '${TMPDIR}' could not be created.\n"; exit 1
+fi
+
+if ! touch "${LOGFILE}" 2>/dev/null; then
+	redBold "ERROR: The logfile '${LOGFILE}' could not be created.\n"; exit 1
+fi
+
+findFiles () {			# creates list of files to edit
+	if [ ${files_without_extension} == 'no' ]; then
+		if [ ${recursive} == 'no' ]; then
+			find * -maxdepth 0 -iname '*.flac' -type f | sort >"${FILELIST}"
+		elif [ ${recursive} == 'yes' ]; then
+			find * -iname '*.flac' -type f | sort >"${FILELIST}"
+		fi
+	elif [ ${files_without_extension} == 'yes' ]; then
+		if [ ${recursive} == 'no' ]; then
+			find * -maxdepth 0 -type f | sort >"${FILELIST}"
+		elif [ ${recursive} == 'yes' ]; then
+			find * -type f | sort >"${FILELIST}"
+		fi
+	fi
+	if [ ${errors} == 'yes' ]; then
+		comm -2 -3 "${FILELIST}" "${EXCLUDELIST}" >"${USABLEFILES}"
+	else
+		cat "${FILELIST}" >"${USABLEFILES}"
+	fi
+}
+
+findTotalNumber () {	# find total number of files selected to edit
+	totalnumber="$(cat "${USABLEFILES}" | wc -l)"
+}
+setFileToEdit () {		# set the file to edit
+	arrayposition=$((${line}-1))
+	old_IFS=${IFS}
+	IFS="
+"
+	if [ "${1}" == 'FILELIST' ]; then
+		files=($(cat "${FILELIST}"))
+	else
+		files=($(cat "${USABLEFILES}"))
+	fi
+	IFS=${old_IFS}
+	file_to_edit="${files[${arrayposition}]}"
+	if [ "${edit_method}" != 'all' ]; then
+		file_info="${file_to_edit}"
+	fi
+}
+decrementLine () {		# decrements line count by one (for previous file in USABLEFILES)
+	line=$((${line}-1))
+}
+incrementLine () {		# increments line count by one (for next file in USABLEFILES)
+	line=$((${line}+1))
+}
+incrementArray () {		# increments array count by one (for next item in array)
+	arrayposition=$((${arrayposition}+1))
+}
+obtainMetadata () {		# obtain metadata - if arg is given, only from that block type
+	if [ $# -eq 0 ]; then
+		metaflac --list "${file_to_edit}" >"${METADATA}"
+	else
+		metaflac --list --block-type=${1} "${file_to_edit}" >"${METADATA}"
+		if [ -z "$(cat "${METADATA}")" ]; then
+			metadata='none'
+		fi
+	fi
+	totalblocknumber="$(cat "${METADATA}" | grep -c "^METADATA")"
+}
+createMetadataArray () {	# creates an array element for each metadata block
+	arrayposition=0
+	until [ ${arrayposition} -eq ${totalblocknumber} ]; do
+		position=$((${arrayposition}+1))
+		block[${arrayposition}]="$(cat "${METADATA}" | grep "^METADATA" | cut -c 17- | sed -n "${position}p")"
+		incrementArray
+	done
+}
+print_dir_instead='no';print_file_instead='no';print_tags_instead='no'
+forAllFilesDoAction () {	# carries out for each file the function 'action'
+	if [ ${edit_method} == 'all' ]; then
+		findFiles;line=1;findTotalNumber
+		until [ ${line} -gt ${totalnumber} ]; do
+			setFileToEdit
+			printTitle
+			if [ ${print_dir_instead} == 'yes' ]; then
+				printCurrentDir
+			elif [ ${print_file_instead} == 'yes' ]; then
+				redBold "${file_to_edit}\n\n"
+			elif [ ${print_tags_instead} == 'yes' ]; then
+				listTagsSingle
+				if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+					cat "${TAGS}";printf "\n"
+				else
+					redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+				fi
+			else
+				printSelectedFile
+			fi
+			if [ $# -eq 1 ]; then
+				echo "${1}"
+			fi
+			printf "( ${line} / ${totalnumber} )\n"
+			if ! action 2>>"${LOGFILE}"; then
+				printError;return 1
+			fi
+			incrementLine
+		done
+	else
+		printTitle;printSelectedFile
+		if [ $# -eq 1 ]; then echo "${1}";fi
+		printf "( 1 / 1 )\n"
+		if ! action 2>>"${LOGFILE}"; then
+			printError;return 1
+		fi
+	fi
+}
+checkFiles () {			# checks files to see if metaflac throws up any errors
+	printTitle;printCurrentDir
+	printf "Checking files...\n\n"
+	recursive='yes';findFiles;line=1;totalnumber="$(cat "${FILELIST}" | wc -l)"
+	errors='no'
+	until [ ${line} -gt ${totalnumber} ]; do
+		printTitle;printCurrentDir
+		printf "Checking files...";printf "\n( ${line} / ${totalnumber} )\n\n"
+		edit_method='all';setFileToEdit 'FILELIST'
+		if [ ! -r "${file_to_edit}" 2>>"${LOGFILE}" ]; then
+			errors='yes'
+			printf "${file_to_edit}\n" >>"${EXCLUDELIST}"
+			incrementLine;continue
+		fi
+		if [ ${include_non_writable} == 'no' ]; then
+			if [ ! -w "${file_to_edit}" 2>>"${LOGFILE}" ]; then
+				errors='yes'
+				printf "${file_to_edit}\n" >>"${EXCLUDELIST}"
+				incrementLine;continue
+			fi
+		fi
+		if ! metaflac --export-tags-to=/dev/null "${file_to_edit}" 2>>"${LOGFILE}"; then
+			errors='yes'
+			printf "${file_to_edit}\n" >>"${EXCLUDELIST}"
+		fi
+		incrementLine
+	done
+	recursive='no';findFiles;findTotalNumber;totalnumber_exc="${totalnumber}"
+	recursive='yes';findFiles;findTotalNumber;totalnumber_inc="${totalnumber}"
+	if [ ${errors} == 'yes' ]; then
+		cat "${EXCLUDELIST}"
+		enterToContinue "These files either cannot be read or are not FLAC files.\nThey will not be included in searches or editing tasks."
+	else
+		sleep 0.25
+	fi
+}
+
+# }}}
+
+#==============================================================================
+# main menu
+#==============================================================================
+# {{{
+
+mainMenu () {
+	if ! cd "${startdir}" 2>>"${LOGFILE}"; then
+		redBold "ERROR: the directory '${startdir}' could not be accessed.\n"
+		exit 1
+	fi
+	errors='unchecked'
+	if [ ${skip_checks} == 'no' ]; then
+		checkFiles
+	else
+		recursive='no';findFiles;findTotalNumber;totalnumber_exc="${totalnumber}"
+		recursive='yes';findFiles;findTotalNumber;totalnumber_inc="${totalnumber}"
+	fi
+	while true; do
+		printTitle;printCurrentDir
+		printf "${FLACK_MM}"
+		printf "Excluding subdirectories";redBold " (${totalnumber_exc})";printf ":\n"
+		printMenuEntry " 1) " "List files\n"
+		printMenuEntry " 2) " "List tags\n"
+		printMenuEntry " 3) " "Edit METADATA\n\n"
+		printf "Including subdirectories";redBold " (${totalnumber_inc})";printf ":\n"
+		printMenuEntry " 4) " "List files\n"
+		printMenuEntry " 5) " "List tags\n"
+		printMenuEntry " 6) " "Edit METADATA\n\n"
+		printMenuEntry " 7) " "View logfile\n"
+		printMenuEntry " q) " "Quit\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				recursive='no'
+				if [ ${totalnumber_exc} -eq 0 ]; then
+					enterToContinue "There are no readable files in this directory.";continue
+				fi
+				listFiles | less
+				continue
+			;;
+			"2" )
+				recursive='no'
+				edit_method='all'
+				if [ ${totalnumber_exc} -eq 0 ]; then
+					enterToContinue "There are no readable files in this directory.";continue
+				fi
+				listTagsAll;cat "${TAGS}" | less
+				continue
+			;;
+			"3" )
+				recursive='no'
+				if [ ${totalnumber_exc} -eq 0 ]; then
+					enterToContinue "There are no readable files in this directory.";continue
+				fi
+				editMenu;continue
+			;;
+			"4" )
+				recursive='yes'
+				if [ ${totalnumber_inc} -eq 0 ]; then
+					enterToContinue "There are no readable files in this directory.";continue
+				fi
+				listFiles | less
+				continue
+			;;
+			"5" )
+				recursive='yes'
+				edit_method='all'
+				if [ ${totalnumber_inc} -eq 0 ]; then
+					enterToContinue "There are no readable files in this directory.";continue
+				fi
+				listTagsAll;cat "${TAGS}" | less
+				continue
+			;;
+			"6" )
+				recursive='yes'
+				if [ ${totalnumber_inc} -eq 0 ]; then
+					enterToContinue "There are no readable files in this directory.";continue
+				fi
+				editMenu;continue
+			;;
+			"7" )
+				cat "${LOGFILE}" | less
+				continue
+			;;
+			"q" )
+				exit 0
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+listFiles () {
+	findFiles;findTotalNumber
+	if [ ${totalnumber} -eq 0 ]; then
+		printf "There are no readable FLAC files in this directory."
+	else
+		cat "${USABLEFILES}"
+	fi
+}
+
+listTagsSingle () {
+	redBold "${file_to_edit}\n" >"${TAGS}"
+	metaflac --export-tags-to=- "${file_to_edit}" | sort >>"${TAGS}"
+	tag_lines="$(cat "${TAGS}" | wc -l)"
+	tag_lines=$((${tag_lines}-1))
+}
+
+listTagsAll () {
+	findFiles;findTotalNumber
+	if [ ${totalnumber} -eq 0 ]; then
+		printf "There are no readable FLAC files in this directory."
+	else
+		rm -rf "${TAGS}"
+		action () {
+			redBold "${file_to_edit}\n" >>"${TAGS}"
+			metaflac --export-tags-to=- "${file_to_edit}" | sort >>"${TAGS}"
+			printf "\n" >>"${TAGS}"
+		}
+		print_dir_instead='yes'
+		forAllFilesDoAction "Obtaining tags..." || return 1
+		print_dir_instead='no'
+	fi
+}
+
+# }}}
+
+#==============================================================================
+# edit menu
+#==============================================================================
+# {{{
+
+editMenu () {
+	findFiles;findTotalNumber
+	if [ ${totalnumber} -eq 1 ]; then
+		editSingle
+		return
+	fi
+	while true; do
+		printTitle;printCurrentDir
+		printf "${FLACK_ET}"
+		printf "Main options:\n"
+		printMenuEntry " 1) " "Edit single file\n"
+		printMenuEntry " 2) " "Edit all files one at a time\n"
+		printMenuEntry " 3) " "Edit all files at once\n\n" 
+		printf "Other options:\n"
+		printMenuEntry " 4) " "Edit TITLE field of all files one at a time\n"
+		printMenuEntry " 5) " "Edit a custom field of all files one at a time\n\n"
+		printMenuEntry " b) " "Back to Main Menu\n"
+		printMenuEntry " q) " "Quit\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				edit_method='single';editSingle;continue
+			;;
+			"2" )
+				edit_method='singleall';editSingleAll;continue
+			;;
+			"3" )
+				edit_method='all';editAll;continue
+			;;
+			"4" )
+				edit_method='all'
+				overwrite='yes'
+				action () {
+					printPrompt "\nEnter a value for the field 'TITLE': "
+					read value
+					if [ -z "${value}" ]; then
+						return
+					fi
+					metaflac --remove-tag="TITLE" "${file_to_edit}"
+					metaflac --set-tag=TITLE="${value}" "${file_to_edit}"
+					enterToContinue "The field 'TITLE' has been set to '${value}'";return
+				}
+				print_tags_instead='yes';forAllFilesDoAction;print_tags_instead='no';continue
+			;;
+			"5" )
+				edit_method='all'
+				overwrite='yes'
+				printTitle;printCurrentDir
+				printPrompt "Enter a field to edit: "
+				read field
+				if [ -z "${field}" ]; then
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+				action () {
+					printPrompt "\n\nEnter a value for the field '${field}': "
+					read value
+					if [ -z "${value}" ]; then
+						return
+					fi
+					metaflac --remove-tag="${field}" "${file_to_edit}"
+					metaflac --set-tag="${field}"="${value}" "${file_to_edit}"
+					enterToContinue "The field '${field}' has been set to '${value}'";return
+				}
+				print_file_instead='yes';forAllFilesDoAction;print_file_instead='no';continue
+			;;
+			"b" )
+				return
+			;;
+			"q" )
+				exit
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+editSingle () {
+	while true; do
+		printTitle;printCurrentDir
+		findFiles;line=1;findTotalNumber
+		until [ ${line} -gt ${totalnumber} ]; do
+			setFileToEdit
+			printMenuEntry " ${line}) " "${file_to_edit}\n"
+			incrementLine
+		done
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select a file to edit: "
+		read option
+		case "${option}" in
+			"b" )
+				return
+			;;
+			* )
+				if [ -z "${option}" ]; then
+					enterToContinue "${MSG_INVALID}";continue
+				elif [ ${option} -eq ${option} 2>/dev/null ]; then
+					if [ ${option} -gt 0 ] && [ ${option} -le ${totalnumber} ]; then
+						line=${option};setFileToEdit
+						editTags
+						return
+					fi
+				fi
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+editSingleAll () {
+	findFiles;line=1;findTotalNumber
+	until [ ${line} -gt ${totalnumber} ]; do
+		setFileToEdit
+		if editTags; then
+			incrementLine
+		else
+			decrementLine
+		fi
+	done
+}
+
+editAll () {
+	findFiles;findTotalNumber
+	setFileInfo
+	editTags
+}
+
+setFileInfo () {
+	if [ ${recursive} == 'no' ]; then
+		file_info="'${startdir}' (${totalnumber})"
+	else
+		file_info="'${startdir}' and subdirectories (${totalnumber})"
+	fi
+}
+
+editTags ()
+{
+	while true; do
+		printTitle
+		if [ ${edit_method} != 'all' ]; then
+			listTagsSingle
+			if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+				cat "${TAGS}";printf "\n"
+			else
+				redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+			fi
+		else
+			printSelectedFile
+		fi
+		printf "${FLACK_ET}"
+		printMenuEntry " 1) " "View tags";printf "\t\t";printf "Advanced options:\n"
+		printMenuEntry " 2) " "Remove tags";printf "\t\t"
+		if [ ${edit_method} == 'all' ]; then
+			printMenuEntry " 7) " "Remove METADATA block by type\n"
+		else
+			printMenuEntry " 7) " "View/Remove METADATA blocks\n"
+		fi
+		printMenuEntry " 3) " "Remove pictures";printf "\t";printMenuEntry " 8) " "Add/Remove ReplayGain tags\n"
+		printMenuEntry " 4) " "Edit tags";printf "\t\t";printMenuEntry " 9) " "Add/Remove seekpoints\n"
+		printMenuEntry " 5) " "Change filename";printf "\t";printMenuEntry " 10) " "Import/Export cuesheet\n"
+		printMenuEntry " 6) " "Import picture";printf "\t"
+		if [ ${edit_method} != 'all' ]; then
+			printMenuEntry " 11) " "Export picture\n\n"
+		else
+			printf "\n\n"
+		fi
+		if [ ${edit_method} == 'singleall' ]; then
+			if [ ${line} -lt ${totalnumber} ]; then
+				printMenuEntry " n) " "Next File\n"
+			fi
+			if [ ${line} -gt 1 ]; then
+				printMenuEntry " p) " "Previous file\n"
+			fi
+			printf "\n"
+		fi
+		printMenuEntry " b) " "Back\n"
+		printMenuEntry " q) " "Quit\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				if [ ${edit_method} == 'all' ]; then
+					listTagsAll;cat "${TAGS}" | less
+				else
+					listTagsSingle
+					if [ ${tag_lines} -gt 1 ]; then
+						cat "${TAGS}" | less
+					else
+						enterToContinue "This file does not have any tags.";continue
+					fi
+				fi
+				continue
+			;;
+			"2" )
+				removeTags;continue
+			;;
+			"3" )
+				removePicture;continue
+			;;
+			"4" )
+				overwrite='yes'
+				addTags;continue
+			;;
+			"5" )
+				changeFilename;continue
+			;;
+			"6" )
+				importPicture;continue
+			;;
+			"7" )
+				if [ ${edit_method} == 'all' ]; then
+					removeBlockType
+				else
+					metadataMenu
+				fi
+				continue
+			;;
+			"8" )
+				replayGainMenu;continue
+			;;
+			"9" )
+				seekpointsMenu;continue
+			;;
+			"10" )
+				cuesheetMenu;continue
+			;;
+			"11" )
+				if [ ${edit_method} == 'all' ]; then
+					enterToContinue "${MSG_INVALID}"
+				else
+					exportPicture
+				fi
+				continue
+			;;
+			"n" )
+				if [ ${edit_method} == 'singleall' ] && [ ${line} -lt ${totalnumber} ]; then
+					return 0
+				else
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+			;;
+			"p" )
+				if [ ${edit_method} == 'singleall' ] && [ ${line} -gt 1 ]; then
+					return 1
+				else
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+			;;
+			"b" )
+				if [ ${edit_method} == 'singleall' ]; then
+					break 2
+				else
+					return 0
+				fi
+			;;
+			"q" )
+				exit
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+removeTags () {
+	while true; do
+		printTitle
+		if [ ${edit_method} != 'all' ]; then
+			listTagsSingle
+			if [ ${tag_lines} -eq 1 ]; then
+				enterToContinue "This file does not have any tags.";break
+			elif [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+				cat "${TAGS}";printf "\n"
+			else
+				redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+			fi
+		else
+			printSelectedFile
+		fi
+		printf "${FLACK_RT}"
+		arrayposition=0
+		until [ ${arrayposition} -eq ${commonfieldtotal} ]; do
+			position=$((${arrayposition}+1))
+			printMenuEntry " ${position}) " "${COMMON_FIELDS[${arrayposition}]}\n"
+			incrementArray
+		done
+		printMenuEntry " o) " "Other\n"
+		printMenuEntry " a) " "All\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select a field to remove: "
+		read option
+		case "${option}" in
+			"b" )
+				return
+			;;
+			"o" )
+				printTitle
+				if [ ${edit_method} != 'all' ]; then
+					if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+						cat "${TAGS}";printf "\n"
+					else
+						redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+					fi
+				fi
+				printf "${FLACK_RT}"
+				printf "\nLeave blank to cancel.\n"
+				printPrompt "\nEnter the field to remove: "
+				read field
+				if [ -z "${field}" ]; then
+					continue
+				fi
+				action () {
+						metaflac --remove-tag="${field}" "${file_to_edit}"
+				}
+				forAllFilesDoAction "Removing tags matching the field '${field}'..." || continue
+				enterToContinue "${MSG_SUCCESS}";continue
+			;;
+			"a" )
+				printTitle
+				if [ ${edit_method} != 'all' ]; then
+					if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+						cat "${TAGS}";printf "\n"
+					else
+						redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+					fi
+				fi
+				printf "${FLACK_RT}"
+				printYesNo "\nRemove all tags [y/n]?: " || continue
+				action () {
+					metaflac --remove-all-tags "${file_to_edit}"
+				}
+				forAllFilesDoAction "Removing all tags..." || continue
+				enterToContinue "${MSG_SUCCESS}";return
+			;;
+			* )
+				if [ -z "${option}" ]; then
+					enterToContinue "${MSG_INVALID}";continue
+				elif [ ${option} -eq ${option} 2>/dev/null ]; then
+					if [ ${option} -gt 0 ] && [ ${option} -le ${commonfieldtotal} ]; then
+						arrayposition=$((${option}-1))
+						field="${COMMON_FIELDS[${arrayposition}]}"
+						action () {
+							metaflac --remove-tag="${field}" "${file_to_edit}"
+						}
+						forAllFilesDoAction "Removing tags matching the field '${field}'..." || continue
+						enterToContinue "${MSG_SUCCESS}";continue
+					fi
+				else
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+			;;
+		esac
+	done
+}
+
+removePicture () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_RP}"
+		if [ ${edit_method} != 'all' ]; then
+			printf "\nRetrieving METADATA...\n";obtainMetadata "PICTURE"
+			totalblocknumber="$(cat "${METADATA}" | grep -c METADATA)"
+			printTitle;printSelectedFile
+			printf "${FLACK_RP}"
+			if [ "${totalblocknumber}" -eq 0 ]; then
+				enterToContinue "This file does not have a picture METADATA block.";return
+			fi
+			printMenuEntry " 1) " "View picture METADATA blocks\n"
+			printMenuEntry " 2) " "Specify a METADATA block to remove\n"
+			printMenuEntry " 3) " "Remove all picture METADATA blocks\n"
+			printMenuEntry " b) " "Back\n\n"
+			printPrompt "Select an option: "
+			read option
+			case "${option}" in
+				"1" )
+					cat "${METADATA}" | grep -A 11 --color=always "^METADATA" | less
+					continue
+				;;
+				"2" )
+					createMetadataArray
+					printTitle;printSelectedFile
+					printf "${FLACK_RP}"
+					arrayposition=0
+					until [ ${arrayposition} -eq ${totalblocknumber} ]; do
+						position=$((${arrayposition}+1))
+						printMenuEntry " ${position}) " "${block[${arrayposition}]}\n"
+						incrementArray
+					done
+					printMenuEntry " b) " "Back\n\n"
+					printPrompt "Select a PICTURE block to remove: "
+					read blocknumber
+					if [ -z "${blocknumber}" ]; then
+						enterToContinue "${MSG_INVALID}";continue
+					elif [ "${blocknumber}" == 'b' ]; then
+						return
+					elif [ ${blocknumber} -eq ${blocknumber} 2>/dev/null ]; then
+						if [ ${blocknumber} -gt 0 ] && [ ${blocknumber} -le ${totalblocknumber} ]; then
+							arrayposition=$((${blocknumber}-1))
+							blocknumber="${block[${arrayposition}]}"
+							action () {
+								metaflac --remove --block-number="${blocknumber}" "${file_to_edit}"
+							}
+							forAllFilesDoAction "Removing METADATA block #${blocknumber}..." || continue
+							enterToContinue "${MSG_SUCCESS}";continue
+						else
+							enterToContinue "${MSG_INVALID}";continue
+						fi
+					fi
+					continue
+				;;
+				"3" )
+					setFileToEdit
+					printTitle;printSelectedFile
+					printf "${FLACK_RP}"
+					printYesNo "\nRemove all picture METADATA blocks [y/n]?: " || continue
+					action () {
+						metaflac --remove --block-type=PICTURE "${file_to_edit}"
+					}
+					forAllFilesDoAction "Removing all picture METADATA blocks..." || continue
+					enterToContinue "${MSG_SUCCESS}";return
+				;;
+				"b" )
+					return
+				;;
+				* )
+					enterToContinue "${MSG_INVALID}";continue
+				;;
+			esac
+			elif [ ${edit_method} == 'all' ]; then
+			printTitle;printSelectedFile
+			printf "${FLACK_RP}"
+			printYesNo "\nRemove all picture METADATA blocks [y/n]?: " || return
+			action () {
+				metaflac --remove --block-type=PICTURE "${file_to_edit}"
+			}
+			forAllFilesDoAction "Removing all picture METADATA blocks..." || return
+			enterToContinue "${MSG_SUCCESS}";return
+		fi
+	done
+}
+
+addTags () {
+	while true; do
+		printTitle
+		if [ ${edit_method} != 'all' ]; then
+			listTagsSingle
+			if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+				cat "${TAGS}";printf "\n"
+			else
+				redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+			fi
+		else
+			printSelectedFile
+		fi
+		printf "${FLACK_ET}"
+		arrayposition=0
+		until [ ${arrayposition} -eq ${commonfieldtotal} ]; do
+			position=$((${arrayposition}+1))
+			printMenuEntry " ${position}) " "${COMMON_FIELDS[${arrayposition}]}\n"
+			incrementArray
+		done
+		printMenuEntry " o) " "Other\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select a field to add/edit: "
+		read option
+		case "${option}" in
+			"b" )
+				return
+			;;
+			"o" )
+				printTitle
+				if [ ${edit_method} != 'all' ]; then
+					if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+						cat "${TAGS}";printf "\n"
+					else
+						redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+					fi
+				fi
+				printf "${FLACK_ET}"
+				printf "\nLeave blank to cancel.\n"
+				printPrompt "\nEnter a field to add/edit: "
+				read field
+				if [ -z "${field}" ]; then
+					continue
+				fi
+				printTitle
+				if [ ${edit_method} != 'all' ]; then
+					if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+						cat "${TAGS}";printf "\n"
+					else
+						redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+					fi
+				fi
+				printf "${FLACK_ET}"
+				printPrompt "\nEnter a value for the field '${field}': "
+				read value
+				if [ -z "${value}" ]; then
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+				action () {
+					if [ "${overwrite}" == 'yes' ]; then
+						metaflac --remove-tag="${field}" "${file_to_edit}"
+					fi
+					metaflac --set-tag="${field}"="${value}" "${file_to_edit}"
+				}
+				forAllFilesDoAction "Adding tag field '${field}'..." || continue
+				enterContinue "\nThe field '${field}' has been set to '${value}'.";continue
+			;;
+			* )
+				printTitle
+				if [ ${edit_method} != 'all' ]; then
+					if [ ${tag_lines} -le ${maximum_tag_lines} ]; then
+						cat "${TAGS}";printf "\n"
+					else
+						redBold "${file_to_edit}\n";printf "${tag_lines} tags.\n\n"
+					fi
+				fi
+				printf "${FLACK_ET}"
+				if [ -z "${option}" ]; then
+					enterToContinue "${MSG_INVALID}";continue
+				elif [ ${option} -eq ${option} 2>/dev/null ]; then
+					if [ ${option} -gt 0 ] && [ ${option} -le ${commonfieldtotal} ]; then
+						arrayposition=$((${option}-1))
+						field="${COMMON_FIELDS[${arrayposition}]}"
+						if [ ${edit_method} == 'all' ]; then
+							if [ "${field}" == 'TRACKNUMBER' ]; then
+								printf "\nEnter 'auto' to number the tracks from 1 to ${totalnumber}\n"
+							fi
+						fi
+						printPrompt "\nEnter a value for the field '${field}': "
+						read value
+						if [ -z "${value}" ]; then
+							enterToContinue "${MSG_INVALID}";continue
+						fi
+						if [ ${edit_method} == 'all' ]; then
+							if [ "${field}" == 'TRACKNUMBER' ]; then
+								action () {
+									if [ ${overwrite} == 'yes' ]; then
+										metaflac --remove-tag="${field}" "${file_to_edit}"
+									fi
+									if [ "${value}" == 'auto' ]; then
+										if [ ${line} -lt 10 ]; then
+											tracknumber="0${line}"
+										else
+											tracknumber="${line}"
+										fi
+										metaflac --set-tag=TRACKNUMBER="${tracknumber}" "${file_to_edit}"
+									else
+										metaflac --set-tag=TRACKNUMBER="${value}" "${file_to_edit}"
+									fi
+								}
+								forAllFilesDoAction "Setting tracknumbers from 1 to ${totalnumber}..." || continue
+								enterToContinue "\nThe TRACKNUMBER fields have been set automatically.";continue
+							fi
+						fi
+						action () {
+							if [ ${overwrite} == 'yes' ]; then
+								metaflac --remove-tag="${field}" "${file_to_edit}"
+							fi
+							metaflac --set-tag="${field}"="${value}" "${file_to_edit}"
+						}
+						forAllFilesDoAction "Setting '${field}' to '${value}'..." || continue
+						enterToContinue "\nThe field '${field}' has been set to '${value}'.";continue
+					fi
+				else
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+			;;
+		esac
+	done
+}
+
+importPicture () {
+	while true; do
+		picture_type='';picture_mime='';picture_description='';picture_dimensions=''
+		printTitle;printSelectedFile
+		printf "${FLACK_IP}"
+		printf "Using default options:\n"
+		printMenuEntry " 1) " "Specify a file\n"
+		printMenuEntry " 2) " "Specify a URL\n\n"
+		printf "Using custom options:\n"
+		printMenuEntry " 3) " "Specify a file\n"
+		printMenuEntry " 4) " "Specify a URL\n\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				definePictureFile;importPictureAction;continue
+			;;
+			"2" )
+				definePictureURL;importPictureAction;continue
+			;;
+			"3" )
+				definePictureOptions || continue
+				definePictureFile;importPictureAction;continue
+			;;
+			"4" )
+				definePictureOptions || continue
+				definePictureURL;importPictureAction;continue
+			;;
+			"b")
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+importPictureAction () {
+	action () {
+		metaflac --import-picture-from="${picture_type}|${picture_mime}|${picture_description}|${picture_dimensions}|${picture_file}" "${file_to_edit}"
+	}
+	forAllFilesDoAction "Importing picture file '${picture_file}'..." || return 1
+	enterToContinue "${MSG_SUCCESS}";return
+}
+
+definePictureFile () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_IP}\n"
+		read -e -p "Enter the full path to the picture file: " picture_file
+		if [ -z "${picture_file}" -o -z "$(echo "${picture_file}" | grep '^/')" ]; then
+			enterToContinue "Please specify the full path to the picture file.";continue
+		elif [ ! -e "${picture_file}" ]; then
+			enterToContinue "The file '${picture_file}' does not exist.";continue
+		fi
+		break
+	done
+}
+
+definePictureURL () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_IP}"
+		printPrompt "Enter the URL: "
+		read picture_file
+		if [ -z "${picture_file}" ]; then
+			enterToContinue "This field cannot be empty.";continue
+		fi
+	done
+}
+
+definePictureOptions () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_IP}"
+		printMenuEntry " 1) " "32x32 file icon";printMenuEntry "\t\t 12) " "Lyricist/Text writer\n"
+		printMenuEntry " 2) " "Other file icon";printMenuEntry "\t\t 13) " "Recording location\n"
+		printMenuEntry " 3) " "Front cover [default]";printMenuEntry "\t 14) " "During recording\n"
+		printMenuEntry " 4) " "Back cover";printMenuEntry "\t\t\t 15) " "During performance\n"
+		printMenuEntry " 5) " "Leaflet page";printMenuEntry "\t\t 16) " "Movie/Video screen capture\n"
+		printMenuEntry " 6) " "Media";printMenuEntry "\t\t\t 17) " "A bright coloured fish\n"
+		printMenuEntry " 7) " "Lead artist";printMenuEntry "\t\t\t 18) " "Illustration\n"
+		printMenuEntry " 8) " "Artist/Performer";printMenuEntry "\t\t 19) " "Band/Artist logotype\n"
+		printMenuEntry " 9) " "Conductor";printMenuEntry "\t\t\t 20) " "Publisher/Studio logotype\n"
+		printMenuEntry " 10) " "Band/Orchestra";printMenuEntry "\t\t 21) " "Other\n"
+		printMenuEntry " 11) " "Composer";printMenuEntry "\t\t\t b) " "Back\n\n"
+		printPrompt "Select a picture type: "
+		read picture_type
+		if [ ${picture_type} -eq ${picture_type} 2>/dev/null ]; then
+			if [ ${picture_type} -ge 1 ] && [ ${picture_type} -le 21 ]; then
+				break
+			else
+				enterToContinue "${MSG_INVALID}";continue
+			fi
+		elif [ "${picture_type}" == 'b' ]; then
+			return
+		else
+			enterToContinue "${MSG_INVALID}";continue
+		fi
+	done
+
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_IP}"
+		printMenuEntry " 1) " "Auto-detect [default]\n"
+		printMenuEntry " 2) " "image/jpeg\n"
+		printMenuEntry " 3) " "image/png\n"
+		printMenuEntry " 4) " "image/gif\n"
+		printMenuEntry " 5) " "URL\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select a MIME-type: "
+		read picture_mime
+		case "${picture_mime}" in
+			"1" )
+				picture_mime='';break
+			;;
+			"2" )
+				picture_mime='image/jpeg';break
+			;;
+			"3" )
+				picture_mime='image/png';break
+			;;
+			"4" )
+				picture_mime='image/gif';break
+			;;
+			"5" )
+				picture_mime='-->';break
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_IP}"
+		printMenuEntry " 1) " "No description [default]\n"
+		printMenuEntry " 2) " "Enter a description\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				picture_description='';break
+			;;
+			"2" )
+				printTitle;printSelectedFile
+				printf "${FLACK_IP}\n"
+				printPrompt "Enter a description for the picture file: "
+				read picture_description
+				break
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_IP}"
+		printMenuEntry " 1) " "Autodetect picture dimensions [default]\n"
+		printMenuEntry " 2) " "Specify WIDTHxHEIGHTxDEPTH/COLOURS\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				picture_dimensions='';break
+			;;
+			"2" )
+				printTitle;printSelectedFile
+				printf "${FLACK_IP}\n"
+				printPrompt "Enter the WIDTHxHEIGHTxDEPTH/COLOURS: "
+				read picture_dimensions
+				break
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+changeFilename () {
+	while true; do
+		findFiles;findTotalNumber
+		printTitle;printSelectedFile
+		printf "${FLACK_CF}"
+		printMenuEntry " 1) " "'TITLE.flac'\n"
+		printMenuEntry " 2) " "'TRACKNUMBER - TITLE.flac'\n"
+		printMenuEntry " 3) " "'TRACKNUMBER_-_TITLE.flac'\n"
+		printMenuEntry " 4) " "'ARTIST - TITLE.flac'\n"
+		printMenuEntry " 5) " "'ARTIST_-_TITLE.flac'\n"
+		printMenuEntry " 6) " "'ARTIST - ALBUM - TITLE.flac'\n"
+		printMenuEntry " 7) " "'ARTIST_-_ALBUM_-_TITLE.flac'\n"
+		printMenuEntry " 8) " "'ARTIST - ALBUM - TRACKNUMBER - TITLE.flac'\n"
+		printMenuEntry " 9) " "'ARTIST_-_ALBUM_-_TRACKNUMBER_-_TITLE.flac'\n"
+		printMenuEntry " c) " "Specify a custom rule\n"
+		if [ ${edit_method} != 'all' ]; then
+			printMenuEntry " f) " "Specify a filename\n"
+		fi
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		file_location="${file_to_edit%/*}"
+		if [ "${file_location}" == "${file_to_edit}" ]; then
+			file_location='.'
+		fi
+		case "${option}" in
+			"1" )
+				action () {
+					obtainTags;newfilename="${file_location}/${TITLE}.flac"
+					checkTags "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'TITLE.flac'..." || continue
+			;;
+			"2" )
+				action () {
+					obtainTags;newfilename="${file_location}/${TRACKNUMBER} - ${TITLE}.flac"
+					checkTags "${TRACKNUMBER}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'TRACKNUMBER - TITLE.flac'..." || continue
+			;;
+			"3" )
+				action () {
+					obtainTags;newfilename="${file_location}/${TRACKNUMBER}_-_${TITLE}.flac"
+					checkTags "${TRACKNUMBER}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'TRACKNUMBER_-_TITLE.flac'..." || continue
+			;;
+			"4" )
+				action () {
+					obtainTags;newfilename="${file_location}/${ARTIST} - ${TITLE}.flac"
+					checkTags "${ARTIST}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'ARTIST - TITLE.flac'..." || continue
+			;;
+			"5" )
+				action () {
+					obtainTags;newfilename="${file_location}/${ARTIST}_-_${TITLE}.flac"
+					checkTags "${ARTIST}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'ARTIST_-_TITLE.flac'..." || continue
+			;;
+			"6" )
+				action () {
+					obtainTags;newfilename="${file_location}/${ARTIST} - ${ALBUM} - ${TITLE}.flac"
+					checkTags "${ARTIST}" "${ALBUM}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'ARTIST - ALBUM - TITLE.flac'..." || continue
+			;;
+			"7" )
+				action () {
+					obtainTags;newfilename="${file_location}/${ARTIST}_-_${ALBUM}_-_${TITLE}.flac"
+					checkTags "${ARTIST}" "${ALBUM}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'ARTIST_-_ALBUM_-_TITLE.flac'..." || continue
+			;;
+			"8" )
+				action () {
+					obtainTags;newfilename="${file_location}/${ARTIST} - ${ALBUM} - ${TRACKNUMBER} - ${TITLE}.flac"
+					checkTags "${ARTIST}" "${ALBUM}" "${TRACKNUMBER}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'ARTIST - ALBUM - TRACKNUMBER - TITLE.flac'..." || continue
+			;;
+			"9" )
+				action () {
+					obtainTags;newfilename="${file_location}/${ARTIST}_-_${ALBUM}_-_${TRACKNUMBER}_-_${TITLE}.flac"
+					checkTags "${ARTIST}" "${ALBUM}" "${TRACKNUMBER}" "${TITLE}" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to 'ARTIST_-_ALBUM_-_TRACKNUMBER_-_TITLE.flac'..." || continue
+			;;
+			"c" )
+				printTitle;printSelectedFile
+				printf "${FLACK_CF}\n"
+				printf "The .flac extension is automatically appended.\n"
+				printf "Leave blank to use the default rule specified in flackrc.\n\n"
+				printf 'Example input: ${ARTIST} - ${TRACKNUMBER}_${TITLE}'
+				printPrompt "\n\nEnter a custom rule: "
+				read custom_rule
+				if [ -z "${custom_rule}" ]; then
+					custom_rule="${CUSTOM_RULE}"
+				fi
+				action () {
+					obtainTags;newfilename="${file_location}/$(eval echo "${custom_rule}").flac"
+					checkTags "$(eval echo "${custom_rule}").flac" || return
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to '$(echo "${custom_rule}").flac'..." || continue
+			;;
+			"f" )
+				if [ ${edit_method} == 'all' ]; then
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+				printTitle;printSelectedFile
+				printf "${FLACK_CF}"
+				printf "\nThe .flac extension is not automatically appended.\n\n"
+				printPrompt "Enter a filename: "
+				read custom_filename
+				if [ -z "${custom_filename}" ]; then
+					enterToContinue "${MSG_INVALID}";continue
+				fi
+				action () {
+					newfilename="${file_location}/${custom_filename}"
+					moveToNewFileName
+				}
+				forAllFilesDoAction "Changing filename to '${custom_filename}'..." || continue
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+		findFiles
+		if [ "${file_location}" == '.' ]; then
+			file_to_edit="${newfilename#*/}"
+		else
+			file_to_edit="${newfilename}"
+		fi
+		if [ ${edit_method} != 'all' ]; then
+			file_info="${file_to_edit}"
+		fi
+		enterToContinue "${MSG_SUCCESS}";return
+	done
+}
+
+obtainTags () {
+	metaflac --export-tags-to="${TAGS}" "${file_to_edit}"
+	sed -i -e 's/=/="/g' "${TAGS}"
+	sed -i -e 's/$/"/g' "${TAGS}"
+	sed -i -e 's|/|_|g' "${TAGS}"
+	if [ ${keep_special_characters} == 'no' ]; then
+		sed -i -e 's|^-|_|g' "${TAGS}"
+		sed -i -e 's|?|_|g' "${TAGS}"
+		sed -i -e 's|:|_|g' "${TAGS}"
+	fi
+	source "${TAGS}"
+}
+
+checkTags () {
+	while [[ $# != 0 ]]; do
+		if [[ "${1}" =~ ^- ]] || [ -z "${1}" ]; then
+			enterToContinue	"One or more required tag fields are empty.";return 1
+		fi
+		shift
+	done
+}
+
+moveToNewFileName () {
+	if [ "${file_location}" == '.' ]; then
+		if [ "${file_to_edit}" != "${newfilename#*/}" ]; then
+			if [ -e "${newfilename}" ]; then
+				enterToContinue "The file '${newfilename}' already exists.";return
+			else
+				mv "${file_to_edit}" "${newfilename}"
+			fi
+		fi
+	else
+		if [ "${file_to_edit}" != "${newfilename}" ]; then
+			if [ -e "${newfilename}" ]; then
+				enterToContinue "The file '${newfilename}' already exists.";return
+			else
+				mv "${file_to_edit}" "${newfilename}"
+			fi
+		fi
+	fi
+}
+
+metadataMenu () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_MB}"
+		printf "\nRetrieving METADATA...\n";obtainMetadata
+		printTitle;printSelectedFile
+		printf "${FLACK_MB}"
+		printMenuEntry " 1) " "View METADATA block summary\n"
+		printMenuEntry " 2) " "View all METADATA blocks\n"
+		printMenuEntry " 3) " "Remove METADATA block by number\n"
+		printMenuEntry " 4) " "Remove METADATA block by type\n"
+		printMenuEntry " 5) " "Merge adjacent PADDING blocks\n"
+		printMenuEntry " 6) " "Move PADDING blocks to the end and merge\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				cat "${METADATA}" | grep -A 1 --color=always "^METADATA" | less
+				continue
+			;;
+			"2" )
+				cat "${METADATA}" | less
+				continue
+			;;
+			"3" )
+				createMetadataArray
+				removeBlockNumber
+				continue
+			;;
+			"4" )
+				removeBlockType
+				continue
+			;;
+			"5" )
+				printTitle;printSelectedFile
+				printf "${FLACK_MB}"
+				printYesNo "\nMerge adjacent PADDING blocks [y/n]?: " || continue
+				action () {
+					metaflac --merge-padding "${file_to_edit}"
+				}
+				forAllFilesDoAction "Merging adjacent PADDING blocks..." || continue
+				enterToContinue "${MSG_SUCCESS}";continue
+			;;
+			"6" )
+				printTitle;printSelectedFile
+				printf "${FLACK_MB}"
+				printYesNo "\nMove PADDING blocks to the end and merge [y/n]?: " || continue
+				action () {
+					metaflac --sort-padding "${file_to_edit}"
+				}
+				forAllFilesDoAction "Moving PADDING blocks to the end and merging..." || continue
+				enterToContinue "${MSG_SUCCESS}";continue
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+removeBlockType () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_MB}"
+		printMenuEntry " 1) " "APPLICATION\n"
+		printMenuEntry " 2) " "PADDING\n"
+		printMenuEntry " 3) " "PICTURE\n"
+		printMenuEntry " 4) " "SEEKTABLE\n"
+		printMenuEntry " 5) " "VORBIS_COMMENT\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Specify a METADATA block type to remove: "
+		read blocktype
+		case "${blocktype}" in
+			"1" )
+				removeBlockTypeAction 'APPLICATION'
+				continue
+			;;
+			"2" )
+				removeBlockTypeAction 'PADDING'
+				continue
+			;;
+			"3" )
+				removeBlockTypeAction 'PICTURE'
+				continue
+			;;
+			"4" )
+				removeBlockTypeAction 'SEEKTABLE'
+				continue
+			;;
+			"5" )
+				removeBlockTypeAction 'VORBIS_COMMENT'
+				continue
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+removeBlockTypeAction () {
+	blocktype="${1}"
+	printTitle;printSelectedFile
+	printf "${FLACK_MB}"
+	printYesNo "\nRemove all '${blocktype}' blocks [y/n]?: " || return
+	action () {
+		metaflac --remove --block-type=${blocktype} "${file_to_edit}"
+	}
+	forAllFilesDoAction "Removing all '${blocktype}' blocks..." || return
+	enterToContinue "${MSG_SUCCESS}"
+}
+
+removeBlockNumber () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_MB}"
+		arrayposition=0
+		until [ ${arrayposition} -eq ${totalblocknumber} ]; do
+			printMenuEntry " ${arrayposition}) " "${block[${arrayposition}]}\n"
+			incrementArray
+		done
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select a block to remove: "
+		read blocknumber
+		if [ -z "${blocknumber}" ]; then
+			enterToContinue "${MSG_INVALID}";continue
+		elif [ "${blocknumber}" == 'b' ]; then
+			return
+		elif [ ${blocknumber} -eq ${blocknumber} 2>/dev/null ]; then
+			if [ ${blocknumber} -gt 0 ] && [ ${blocknumber} -le ${totalblocknumber} ]; then
+				arrayposition=${blocknumber}
+				blocknumber="${block[${arrayposition}]}"
+				printTitle;printSelectedFile
+				printf "${FLACK_MB}"
+				printYesNo "\nRemove block #${blocknumber} [y/n]?: " || continue
+				action () {
+					metaflac --remove --block-number="${blocknumber}" "${file_to_edit}"
+				}
+				forAllFilesDoAction "Removing METADATA block #${blocknumber}..." || continue
+				enterToContinue "${MSG_SUCCESS}";return
+			else
+				enterToContinue "${MSG_INVALID}";continue
+			fi
+		fi
+	done
+}
+
+replayGainMenu () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_RG}"
+		printMenuEntry " 1) " "Remove ReplayGain\n"
+		printMenuEntry " 2) " "Add ReplayGain (selected files treated as one album)\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+			    printTitle;printSelectedFile
+				printf "${FLACK_RG}"
+				printYesNo "\nRemove ReplayGain [y/n]?: " || continue
+				action () {
+					metaflac --remove-replay-gain "${file_to_edit}"
+				}
+				forAllFilesDoAction "Removing ReplayGain..." || continue
+				enterToContinue "${MSG_SUCCESS}";continue
+			;;
+			"2" )
+				printTitle;printSelectedFile
+				printf "${FLACK_RG}"
+				printYesNo "\nAdd ReplayGain [y/n]?: " || continue
+				printTitle;printSelectedFile
+				printf "${FLACK_RG}"
+				printf "\nAdding ReplayGain...\n"
+				if ! metaflac --add-replay-gain "${files[@]}" 2>"${LOGFILE}"; then
+					printError;continue
+				fi
+				enterToContinue "${MSG_SUCCESS}";continue
+			;;
+			"b" )
+				return
+			;;
+		esac
+	done
+}
+
+seekpointsMenu () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_SP}"
+		printMenuEntry " 1) " "Remove SEEKTABLE block\n"
+		printMenuEntry " 2) " "Add seekpoints\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				printTitle;printSelectedFile
+				printf "${FLACK_SP}"
+				printYesNo "\nRemove SEEKTABLE block [y/n]?: " || continue
+				action () {
+					metaflac --remove --block-type=SEEKTABLE "${file_to_edit}"
+				}
+				forAllFilesDoAction "Removing SEEKTABLE block..." || continue
+				enterToContinue "${MSG_SUCCESS}";continue
+			;;
+			"2" )
+				addSeekpoints;continue
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+addSeekpoints () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_SP}"
+		printf "\n #  - a seekpoint at that sample number is added."
+		printf "\n X  - a placeholder point is added at the end of the table."
+		printf "\n #x - # evenly spaced seekpoints will be added, the first at sample 0."
+		printf "\n #s - a seekpoint will be added every # seconds.\n\n"
+		printf "Enter [b] to go back.\n\n"
+		printPrompt "Specify the seekpoints to add: "
+		read seek
+		if [[ ${seek} =~ ^[0-9]+$ || ${seek} == 'X' || ${seek} =~ ^[0-9]+x$ || ${seek} =~ ^[0-9]+s$ ]]; then
+			action () {
+				metaflac --add-seekpoint=${seek} "${file_to_edit}"
+			}
+			forAllFilesDoAction "Adding seekpoints..." || continue
+			enterToContinue "${MSG_SUCCESS}";return
+		elif [ ${seek} == 'b' ]; then
+			return
+		else
+			enterToContinue "${MSG_INVALID}";continue
+		fi
+	done
+}
+
+exportPicture () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_EP}"
+		printf "\nRetrieving METADATA...\n";obtainMetadata "PICTURE"
+		printTitle;printSelectedFile
+		printf "${FLACK_EP}"
+		printMenuEntry " 1) " "View picture METADATA blocks\n"
+		printMenuEntry " 2) " "Specify a PICTURE block to export\n"
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				cat "${METADATA}" | grep -A 11 --color=always "^METADATA" | less
+				continue
+			;;
+			"2" )
+				createMetadataArray;exportPictureAction;continue
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+exportPictureAction () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_EP}"
+		arrayposition=0
+		until [ ${arrayposition} -eq ${totalblocknumber} ]; do
+			position=$((${arrayposition}+1))
+			printMenuEntry " ${position}) " "${block[${arrayposition}]}\n"
+			incrementArray
+		done
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select a PICTURE block to export: "
+		read blocknumber
+		if [ -z "${blocknumber}" ]; then
+			enterToContinue "${MSG_INVALID}";continue
+		elif [ "${blocknumber}" == 'b' ]; then
+			return
+		elif [ ${blocknumber} -eq ${blocknumber} 2>/dev/null ]; then
+			if [ ${blocknumber} -gt 0 ] && [ ${blocknumber} -le ${totalblocknumber} ]; then
+				arrayposition=$((${blocknumber}-1))
+				blocknumber="${block[${arrayposition}]}"
+				while true; do
+					printTitle;printSelectedFile
+					printf "${FLACK_EP}\n"
+					read -e -p "Enter the full path to export the picture to: " picture_file
+					if [ -z "${picture_file}" -o -z "$(echo "${picture_file}" | grep '^/')" ]; then
+						enterToContinue "Please specify the full path.";continue
+					elif [ -e "${picture_file}" ]; then
+						enterToContinue "The file '${picture_file}' already exists.";continue
+					fi
+					break
+				done
+				action () {
+					metaflac --block-number=${blocknumber} --export-picture-to="${picture_file}" "${file_to_edit}"
+				}
+				forAllFilesDoAction "Exporting block #${blocknumber} to '${picture_file}'..." || continue
+				enterToContinue "${MSG_SUCCESS}";return
+			else
+				enterToContinue "${MSG_INVALID}";continue
+			fi
+		fi
+	done
+}
+
+cuesheetMenu () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_CS}"
+		printMenuEntry " 1) " "Import cuesheet\n"
+		printMenuEntry " 2) " "Import cuesheet without seekpoints\n"
+		if [ ${edit_method} != 'all' ]; then
+			printMenuEntry " 3) " "Export cuesheet\n"
+		fi
+		printMenuEntry " b) " "Back\n\n"
+		printPrompt "Select an option: "
+		read option
+		case "${option}" in
+			"1" )
+				with_seekpoints='yes';importCuesheet;continue
+			;;
+			"2" )
+				with_seekpoints='no';importCuesheet;continue
+			;;
+			"3" )
+				if [ ${edit_method} == 'all' ]; then
+					enterToContinue "${MSG_INVALID}"
+				else
+					exportCuesheet
+				fi
+				continue
+			;;
+			"b" )
+				return
+			;;
+			* )
+				enterToContinue "${MSG_INVALID}";continue
+			;;
+		esac
+	done
+}
+
+importCuesheet () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_CS}\n"
+		read -e -p "Specify the full path to a cuesheet file: " cuesheet
+		if [ -z "${cuesheet}" -o -z "$(echo "${cuesheet}" | grep '^/')" ]; then
+			enterToContinue "Please specify the full path.";continue
+		elif [ ! -e "${cuesheet}" ]; then
+			enterToContinue "The file '${cuesheet}' does not exist.";continue
+		fi
+		if [ ${with_seekpoints} == 'yes' ]; then
+			action () {
+				metaflac --import-cuesheet-from="${cuesheet}" "${file_to_edit}"
+			}
+			forAllFilesDoAction "Importing cuesheet from '${cuesheet}'..." || return
+		elif [ ${with_seekpoints} == 'no' ]; then
+			action () {
+				metaflac --no-cued-seekpoints --import-cuesheet-from="${cuesheet}" "${file_to_edit}"
+			}
+			forAllFilesDoAction "Importing cuesheet without seekpoints from '${cuesheet}'..." || return
+		fi
+		enterToContinue "${MSG_SUCCESS}";return
+	done
+}
+
+exportCuesheet () {
+	while true; do
+		printTitle;printSelectedFile
+		printf "${FLACK_CS}\n"
+		read -e -p "Specify the full path to export to: " cuesheet
+		if [ -z "${cuesheet}" -o -z "$(echo "${cuesheet}" | grep '^/')" ]; then
+			enterToContinue "Please specify the full path.";continue
+		elif [ -e "${cuesheet}" ]; then
+			enterToContinue "The file '${cuesheet}' already exists.";continue
+		fi
+		action () {
+			metaflac --export-cuesheet-to="${cuesheet}" "${file_to_edit}"
+		}
+		forAllFilesDoAction "Exporting cuesheet to '${cuesheet}'..." || return
+		enterToContinue "${MSG_SUCCESS}";return
+	done
+}
+
+# }}}
+
+#==============================================================================
+# CLI options/script initiation
+#==============================================================================
+# {{{
+
+startdir="$(pwd)"
+skip_main_menu='no'
+files_without_extension='no'
+include_non_writable='no'
+keep_special_characters='no'
+maximum_tag_lines=10
+skip_checks='no'
+
+while [[ $# != 0 ]]; do
+	case "${1}" in
+		"-f"|"--file" )
+			edit_method='single'
+			if [ -e "${2}" ]; then
+				file_to_edit="${2}"
+				file_info="${file_to_edit}"
+				files[0]="${file_to_edit}"
+				if ! metaflac --export-tags-to=/dev/null "${file_to_edit}" 2>>"${LOGFILE}"; then
+					redBold "ERROR: This file either cannot be read or is not a FLAC file.\n";exit 1
+				else
+					skip_main_menu='yes'
+				fi
+			else
+				redBold "ERROR: The file '${2}' does not exist.\n";exit 1
+			fi
+			shift 2
+		;;
+		"-g"|"--grayscale" )
+			redBold () {
+				tput bold;printf "${1}";tput sgr0
+			}
+			greenBold () {
+				tput bold;printf "${1}";tput sgr0
+			}
+			purpleBold () {
+				tput bold;printf "${1}";tput sgr0
+			}
+			shift
+		;;
+		"-h"|"--help" )
+			printf "flack v${VERSION}\n"
+			printf "Usage: flack\n"
+			printf "Usage: flack [-f] FILE\n"
+			printf "Usage: flack [-g] [-i] [-k] [-m] INTEGER [-s] [-w]\n\n"
+			printf "Options:\n"
+			printf "  -f <file>, --file <file>\t\tspecify a file to edit\n"
+			printf "  -g, --grayscale\t\t\tuse only black and white text\n"
+   			printf "  -h, --help\t\t\t\tprint this help\n"
+			printf "  -i, --include-non-writable\t\tinclude files that cannot be written to by user\n"
+			printf "  -k, --keep-special-chararacters\tkeep special characters in filenames\n"
+			printf "  -m <num>, --maximum-tag-lines <num>\tmaximum lines of tags to show in menus [default=10]\n"
+			printf "  -s, --skip-checks\t\t\tskip checks for broken files on startup [not recommended]\n"
+			printf "  -w, --without-extension\t\tinclude files without .flac extension\n"
+			exit
+		;;
+		"-i"|"--include-non-writable" )
+			include_non_writable='yes'
+			shift
+		;;
+		"-k"|"--keep-special-characters" )
+			keep_special_characters='yes'
+			shift
+		;;
+		"-m"|"--maximum-tag-lines" )
+			if [ "${2}" -eq "${2}" 2>/dev/null ]; then
+				if [ "${2}" -ge 0 ]; then
+					maximum_tag_lines="${2}"
+				else
+					redBold "ERROR: This maximum number of tag lines must be a positive integer.\n";exit 1
+				fi
+			else
+				redBold "ERROR: The maximum number of tag lines must be a positive integer.\n";exit 1
+			fi
+			shift 2
+		;;
+		"-s"|"--skip-checks" )
+			skip_checks='yes'
+			shift
+		;;
+		"-w"|"--without-extension" )
+			files_without_extension='yes'
+			shift
+		;;
+		* )
+			redBold "ERROR: "${1}": invalid command line option.\n";exit 1
+		;;
+	esac
+done
+
+# set menu titles
+export FLACK_TITLE=$(greenBold "+--------- flack ${VERSION} ---------+\n")
+export FLACK_MM=$(purpleBold "[MAIN MENU]\n")
+export FLACK_ET=$(purpleBold "[EDIT TAGS]\n")
+export FLACK_RT=$(purpleBold "[REMOVE TAGS]\n")
+export FLACK_RP=$(purpleBold "[REMOVE PICTURES]\n")
+export FLACK_IP=$(purpleBold "[IMPORT PICTURE]\n")
+export FLACK_EP=$(purpleBold "[EXPORT PICTURE]\n")
+export FLACK_CF=$(purpleBold "[CHANGE FILENAME]\n")
+export FLACK_MB=$(purpleBold "[METADATA BLOCKS]\n")
+export FLACK_RG=$(purpleBold "[REPLAYGAIN]\n")
+export FLACK_SP=$(purpleBold "[SEEKPOINTS]\n")
+export FLACK_CS=$(purpleBold "[CUESHEETS]\n")
+
+if [ ${skip_main_menu} == 'yes' ]; then
+	editTags
+fi
+
+mainMenu
+
+# }}}
+
+# vim: set ts=4 sw=4 foldmethod=marker :
